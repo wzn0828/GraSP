@@ -1,6 +1,10 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
+import random
+
+random.seed
+random.seed(123)
 
 
 def get_transforms(dataset):
@@ -98,7 +102,7 @@ def get_dataloader(dataset, train_batch_size, test_batch_size, num_workers=2, ro
 
     assert trainset is not None and testset is not None, 'Error, no dataset %s' % dataset
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=train_batch_size, shuffle=True,
-                                              num_workers=num_workers)
+                                              num_workers=num_workers, worker_init_fn=random.seed)
     testloader = torch.utils.data.DataLoader(testset, batch_size=test_batch_size, shuffle=False,
                                              num_workers=num_workers)
 

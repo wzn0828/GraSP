@@ -6,15 +6,29 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 from models.model_base import ModelBase
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from models.base.init_utils import weights_init
-from utils.common_utils import (get_logger, makedirs, process_config, PresetLRScheduler, str_to_list)
+from utils.common_utils import (get_logger, makedirs, process_config, PresetLRScheduler, str_to_list, accuracy, AverageMeter)
 from utils.data_utils import get_dataloader
 from utils.network_utils import get_network
 from pruner.GraSP import GraSP
+
+
+# Random seed, for deterministic behavior
+import random
+import torch.backends.cudnn as cudnn
+
+cudnn.benchmark = False
+cudnn.deterministic = True
+random.seed(123)
+torch.manual_seed(123)
+torch.cuda.manual_seed_all(123)
+# still need to set the work_init_fn to random.seed in train_dataloader, if multi numworkers
+
 
 
 def get_args():
@@ -95,12 +109,35 @@ def save_state(net, acc, epoch, loss, config, ckpt_path, is_best=False):
                                                             config.depth))
 
 
+def get_angular_loss(weight):
+    '''
+    :param weight: parameter of model, out_features *　in_features
+    :return: angular loss
+    '''
+    # for convolution layers, flatten
+    if weight.dim() > 2:
+        weight = weight.view(weight.size(0), -1)
+
+    # Dot product of normalized prototypes is cosine similarity.
+    weight_ = F.normalize(weight, p=2, dim=1)
+    product = torch.matmul(weight_, weight_.t())
+
+    # Remove diagnonal from loss
+    product_ = product - 2. * torch.diag(torch.diag(product))
+    # Maxmize the minimum theta.
+    loss = -torch.acos(product_.max(dim=1)[0].clamp(-0.99999, 0.99999)).mean()
+
+    return loss
+
+
 def train(net, loader, optimizer, criterion, lr_scheduler, epoch, writer, iteration):
     print('\nEpoch: %d' % epoch)
     net.train()
     train_loss = 0
     correct = 0
     total = 0
+    top1 = AverageMeter()
+    top5 = AverageMeter()
 
     lr_scheduler(optimizer, epoch)
     desc = ('[LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
@@ -114,21 +151,32 @@ def train(net, loader, optimizer, criterion, lr_scheduler, epoch, writer, iterat
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
+        train_loss += loss.item()
         # import pdb; pdb.set_trace()
+
+        # for name, m in net.named_modules():
+        #     if isinstance(m, (nn.Linear, nn.Conv2d)):
+        #         angular_loss_hidden = get_angular_loss(m.weight)
+        #         loss = loss + 0.07 * angular_loss_hidden
+
         loss.backward()
         optimizer.step()
 
-        train_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
+        # _, predicted = outputs.max(1)
+        # total += targets.size(0)
+        # correct += predicted.eq(targets).sum().item()
 
-        desc = ('[LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
-                (lr_scheduler.get_lr(optimizer), train_loss / (batch_idx + 1), 100. * correct / total, correct, total))
+        prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
+        top1.update(prec1.item(), inputs.size(0))
+        top5.update(prec5.item(), inputs.size(0))
+
+        desc = ('[LR=%s] Loss: %.3f | Top1: %.3f 　Top5: %.3f' %
+                (lr_scheduler.get_lr(optimizer), train_loss / (batch_idx + 1), top1.avg, top5.avg))
         prog_bar.set_description(desc, refresh=True)
 
     writer.add_scalar('iter_%d/train/loss' % iteration, train_loss / (batch_idx + 1), epoch)
-    writer.add_scalar('iter_%d/train/acc' % iteration, 100. * correct / total, epoch)
+    writer.add_scalar('iter_%d/TOP1/train' % iteration, top1.avg, epoch)
+    writer.add_scalar('iter_%d/TOP5/train' % iteration, top5.avg, epoch)
 
 
 def test(net, loader, criterion, epoch, writer, iteration):
@@ -140,26 +188,38 @@ def test(net, loader, criterion, epoch, writer, iteration):
             % (test_loss / (0 + 1), 0, correct, total))
 
     prog_bar = tqdm(enumerate(loader), total=len(loader), desc=desc, leave=True)
+
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
     with torch.no_grad():
         for batch_idx, (inputs, targets) in prog_bar:
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs = net(inputs)
             loss = criterion(outputs, targets)
-
             test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
 
-            desc = ('Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                    % (test_loss / (batch_idx + 1), 100. * correct / total, correct, total))
+
+            # _, predicted = outputs.max(1)
+            # total += targets.size(0)
+            # correct += predicted.eq(targets).sum().item()
+
+            prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
+            top1.update(prec1.item(), inputs.size(0))
+            top5.update(prec5.item(), inputs.size(0))
+
+
+            desc = ('Loss: %.3f | Top1: %.3f 　Top5: %.3f'
+                    % (test_loss / (batch_idx + 1), top1.avg, top5.avg))
             prog_bar.set_description(desc, refresh=True)
 
     # Save checkpoint.
-    acc = 100. * correct / total
+    acc = top1.avg
 
     writer.add_scalar('iter_%d/test/loss' % iteration, test_loss / (batch_idx + 1), epoch)
-    writer.add_scalar('iter_%d/test/acc' % iteration, 100. * correct / total, epoch)
+    writer.add_scalar('iter_%d/TOP1/test' % iteration, top1.avg, epoch)
+    writer.add_scalar('iter_%d/TOP5/test' % iteration, top5.avg, epoch)
+
     return acc
 
 
@@ -183,8 +243,8 @@ def train_once(mb, net, trainloader, testloader, writer, config, ckpt_path, lear
                 'acc': test_acc,
                 'epoch': epoch,
                 'args': config,
-                'mask': mb.masks,
-                'ratio': mb.get_ratio_at_each_layer()
+                # 'mask': mb.masks,
+                # 'ratio': mb.get_ratio_at_each_layer()
             }
             path = os.path.join(ckpt_path, 'finetune_%s_%s%s_r%s_it%d_best.pth.tar' % (config.dataset,
                                                                                        config.network,
@@ -230,18 +290,18 @@ def main(config):
 
     # preprocessing
     # ====================================== get dataloader ======================================
-    trainloader, testloader = get_dataloader(config.dataset, config.batch_size, 256, 4)
+    trainloader, testloader = get_dataloader(config.dataset, config.batch_size, 256, 4, root='/home/wzn/PycharmProjects/GraSP/data')
     # ====================================== fetch configs ======================================
     ckpt_path = config.checkpoint_dir
     num_iterations = config.iterations
     target_ratio = config.target_ratio
     normalize = config.normalize
     # ====================================== fetch exception ======================================
-    exception = get_exception_layers(mb.model, str_to_list(config.exception, ',', int))
-    logger.info('Exception: ')
-
-    for idx, m in enumerate(exception):
-        logger.info('  (%d) %s' % (idx, m))
+    # exception = get_exception_layers(mb.model, str_to_list(config.exception, ',', int))
+    # logger.info('Exception: ')
+    #
+    # for idx, m in enumerate(exception):
+    #     logger.info('  (%d) %s' % (idx, m))
 
     # ====================================== fetch training schemes ======================================
     ratio = 1 - (1 - target_ratio) ** (1.0 / num_iterations)
@@ -260,44 +320,46 @@ def main(config):
     # ====================================== start pruning ======================================
     iteration = 0
     for _ in range(1):
-        logger.info('** Target ratio: %.4f, iter ratio: %.4f, iteration: %d/%d.' % (target_ratio,
-                                                                                    ratio,
-                                                                                    1,
-                                                                                    num_iterations))
+        # logger.info('** Target ratio: %.4f, iter ratio: %.4f, iteration: %d/%d.' % (target_ratio,
+        #                                                                             ratio,
+        #                                                                             1,
+        #                                                                             num_iterations))
 
         mb.model.apply(weights_init)
         print("=> Applying weight initialization(%s)." % config.get('init_method', 'kaiming'))
-        print("Iteration of: %d/%d" % (iteration, num_iterations))
-        masks = GraSP(mb.model, ratio, trainloader, 'cuda',
-                      num_classes=classes[config.dataset],
-                      samples_per_class=config.samples_per_class,
-                      num_iters=config.get('num_iters', 1))
-        iteration = 0
-        print('=> Using GraSP')
-        # ========== register mask ==================
-        mb.register_mask(masks)
-        # ========== save pruned network ============
-        logger.info('Saving..')
-        state = {
-            'net': mb.model,
-            'acc': -1,
-            'epoch': -1,
-            'args': config,
-            'mask': mb.masks,
-            'ratio': mb.get_ratio_at_each_layer()
-        }
-        path = os.path.join(ckpt_path, 'prune_%s_%s%s_r%s_it%d.pth.tar' % (config.dataset,
-                                                                           config.network,
-                                                                           config.depth,
-                                                                           config.target_ratio,
-                                                                           iteration))
-        torch.save(state, path)
 
-        # ========== print pruning details ============
-        logger.info('**[%d] Mask and training setting: ' % iteration)
-        print_mask_information(mb, logger)
-        logger.info('  LR: %.5f, WD: %.5f, Epochs: %d' %
-                    (learning_rates[iteration], weight_decays[iteration], training_epochs[iteration]))
+
+        # print("Iteration of: %d/%d" % (iteration, num_iterations))
+        # masks = GraSP(mb.model, ratio, trainloader, 'cuda',
+        #               num_classes=classes[config.dataset],
+        #               samples_per_class=config.samples_per_class,
+        #               num_iters=config.get('num_iters', 1))
+        # iteration = 0
+        # print('=> Using GraSP')
+        # # ========== register mask ==================
+        # mb.register_mask(masks)
+        # # ========== save pruned network ============
+        # logger.info('Saving..')
+        # state = {
+        #     'net': mb.model,
+        #     'acc': -1,
+        #     'epoch': -1,
+        #     'args': config,
+        #     'mask': mb.masks,
+        #     'ratio': mb.get_ratio_at_each_layer()
+        # }
+        # path = os.path.join(ckpt_path, 'prune_%s_%s%s_r%s_it%d.pth.tar' % (config.dataset,
+        #                                                                    config.network,
+        #                                                                    config.depth,
+        #                                                                    config.target_ratio,
+        #                                                                    iteration))
+        # torch.save(state, path)
+
+        # # ========== print pruning details ============
+        # logger.info('**[%d] Mask and training setting: ' % iteration)
+        # print_mask_information(mb, logger)
+        # logger.info('  LR: %.5f, WD: %.5f, Epochs: %d' %
+        #             (learning_rates[iteration], weight_decays[iteration], training_epochs[iteration]))
 
         # ========== finetuning =======================
         train_once(mb=mb,
