@@ -1,7 +1,7 @@
 {
-  "exp_name": "tiny_imagenet_vgg19_GraSP_prune_ratio_90",
+  "exp_name": "tiny_imagenet_vgg16bn_angular-all-0.07",
   "network": "vgg",
-  "depth": 19,
+  "depth": 16,
   "dataset": "tiny_imagenet",
   "batch_size": 128,
   "epoch": "300",

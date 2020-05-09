@@ -157,7 +157,7 @@ def train(net, loader, optimizer, criterion, lr_scheduler, epoch, writer, iterat
         # for name, m in net.named_modules():
         #     if isinstance(m, (nn.Linear, nn.Conv2d)):
         #         angular_loss_hidden = get_angular_loss(m.weight)
-        #         loss = loss + 0.07 * angular_loss_hidden
+        #         loss = loss + 0.03 * angular_loss_hidden
 
         loss.backward()
         optimizer.step()
@@ -379,3 +379,4 @@ def main(config):
 if __name__ == '__main__':
     config = init_config()
     main(config)
+
