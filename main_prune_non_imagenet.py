@@ -47,9 +47,15 @@ def get_args():
 
 def init_config():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True)
+    parser.add_argument('--config', type=str, required=False)
     parser.add_argument('--run', type=str, default='')
     args = parser.parse_args()
+
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+    args.config = '/home/wzn/PycharmProjects/GraSP/configs/tiny_imagenet/resnet32/GraSP_90.json'
+
+
     runs = None
     if len(args.run) > 0:
         runs = args.run
@@ -154,10 +160,10 @@ def train(net, loader, optimizer, criterion, lr_scheduler, epoch, writer, iterat
         train_loss += loss.item()
         # import pdb; pdb.set_trace()
 
-        # for name, m in net.named_modules():
-        #     if isinstance(m, (nn.Linear, nn.Conv2d)):
-        #         angular_loss_hidden = get_angular_loss(m.weight)
-        #         loss = loss + 0.03 * angular_loss_hidden
+        for name, m in net.named_modules():
+            if isinstance(m, (nn.Linear, nn.Conv2d)):
+                angular_loss_hidden = get_angular_loss(m.weight)
+                loss = loss + 0.02 * angular_loss_hidden
 
         loss.backward()
         optimizer.step()

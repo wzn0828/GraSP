@@ -1,5 +1,5 @@
 {
-  "exp_name": "tiny_imagenet_resnet56_double",
+  "exp_name": "tiny_imagenet_resnet56_nodouble_angular-all-0.02",
   "network": "resnet",
   "depth": 56,
   "dataset": "tiny_imagenet",
